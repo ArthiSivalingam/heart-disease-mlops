@@ -12,3 +12,5 @@ joblib
 pytest
 httpx
 ruff
+
+prometheus-fastapi-instrumentator==8.1.0

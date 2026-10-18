@@ -5,6 +5,7 @@ from pathlib import Path
 import mlflow.sklearn
 import pandas as pd
 from fastapi import FastAPI, HTTPException
+from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel, Field
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -33,6 +34,9 @@ app = FastAPI(
     description="Educational ML inference API using the UCI Cleveland dataset.",
     version="1.0.0",
 )
+
+# Expose Prometheus request metrics at /metrics.
+Instrumentator().instrument(app).expose(app, endpoint="/metrics")
 
 FEATURES = [
     "age", "sex", "cp", "trestbps", "chol", "fbs", "restecg",
