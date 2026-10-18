@@ -1,6 +1,6 @@
 
-from pathlib import Path
 import logging
+from pathlib import Path
 
 import mlflow.sklearn
 import pandas as pd

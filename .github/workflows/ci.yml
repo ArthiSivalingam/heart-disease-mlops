@@ -8,7 +8,7 @@ on:
     branches: [main, master]
 
 jobs:
-  test:
+  test-and-train:
     runs-on: ubuntu-latest
 
     steps:
@@ -26,5 +26,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Lint Python code
+        run: |
+          ruff check src tests deployment
+
       - name: Run automated tests
-        run: python -m pytest tests/ -v
+        run: |
+          python -m pytest tests/ -v
+
+      - name: Train and track models
+        run: |
+          python -m src.train

@@ -1,10 +1,9 @@
 
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
 
 import mlflow
 import mlflow.sklearn
-
 
 ROOT = Path(__file__).resolve().parents[1]
 MLFLOW_DB = ROOT / "mlflow.db"

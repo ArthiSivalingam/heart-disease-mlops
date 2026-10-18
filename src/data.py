@@ -1,8 +1,8 @@
 
-from datetime import datetime, timezone
+import json
+from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
-import json
 from urllib.request import Request, urlopen
 
 import pandas as pd
@@ -100,7 +100,7 @@ def download_dataset() -> Path:
     metadata = {
         "dataset": "Heart Disease - Cleveland processed data",
         "source_url": DATA_URL,
-        "downloaded_at_utc": datetime.now(timezone.utc).isoformat(),
+        "downloaded_at_utc": datetime.now(UTC).isoformat(),
         "file_name": DATA_FILE.name,
         "sha256": checksum,
         "rows": len(df),
