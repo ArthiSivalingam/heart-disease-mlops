@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   test-build-smoke:
-    name: Lint, test, train, build and smoke-test
+    name: Lint, test, data and train
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
@@ -71,6 +71,47 @@ jobs:
           python -m pytest tests/ -v --junitxml=ci-logs/pytest-report.xml \
             2>&1 | tee ci-logs/pytest.log
 
+      - name: Upload selected serving model for downstream jobs
+        uses: actions/upload-artifact@v4
+        with:
+          name: serving-model-${{ github.run_id }}
+          path: models/heart_disease_model_*/
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Upload CI logs, test report and model artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: heart-disease-mlops-ci-evidence-${{ github.run_id }}
+          path: |
+            ci-logs/
+            mlflow.db
+            mlartifacts/
+            mlruns/
+            models/heart_disease_model_*/
+          if-no-files-found: warn
+          retention-days: 14
+
+  docker-build-smoke:
+    name: Docker build and API smoke test
+    runs-on: ubuntu-latest
+    needs: test-build-smoke
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create Docker evidence directory
+        run: mkdir -p ci-logs
+
+      - name: Download selected serving model
+        uses: actions/download-artifact@v4
+        with:
+          name: serving-model-${{ github.run_id }}
+          path: models/
+
       - name: Build Docker image
         run: |
           set -o pipefail
@@ -112,22 +153,12 @@ jobs:
               health = json.load(file)
           assert health.get("status") == "healthy", health
           assert health.get("model_loaded") is True, health
-          print("Health check passed:", health)
+          print("Container health check passed:", health)
 
           payload = {
-              "age": 63,
-              "sex": 1,
-              "cp": 4,
-              "trestbps": 145,
-              "chol": 233,
-              "fbs": 1,
-              "restecg": 2,
-              "thalach": 150,
-              "exang": 0,
-              "oldpeak": 2.3,
-              "slope": 3,
-              "ca": 0,
-              "thal": 6,
+              "age": 63, "sex": 1, "cp": 4, "trestbps": 145, "chol": 233,
+              "fbs": 1, "restecg": 2, "thalach": 150, "exang": 0,
+              "oldpeak": 2.3, "slope": 3, "ca": 0, "thal": 6,
           }
           request = Request(
               "http://127.0.0.1:8000/predict",
@@ -147,7 +178,7 @@ jobs:
           assert isinstance(probability, (int, float)), result
           assert 0 <= probability <= 1, result
           assert result.get("model"), result
-          print("Prediction smoke test passed:", json.dumps(result))
+          print("Container prediction smoke test passed:", json.dumps(result))
           PY
 
       - name: Capture container diagnostics
@@ -163,16 +194,136 @@ jobs:
         if: always()
         run: docker rm -f heart-disease-api-ci >/dev/null 2>&1 || true
 
-      - name: Upload CI logs, test report and model artifacts
+      - name: Upload Docker smoke-test evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: heart-disease-mlops-ci-evidence-${{ github.run_id }}
-          path: |
-            ci-logs/
-            mlflow.db
-            mlartifacts/
-            mlruns/
-            models/heart_disease_model_*/
+          name: heart-disease-docker-evidence-${{ github.run_id }}
+          path: ci-logs/
+          if-no-files-found: warn
+          retention-days: 14
+
+  kubernetes-deploy-smoke:
+    name: Kubernetes deploy and API smoke test
+    runs-on: ubuntu-latest
+    needs: [test-build-smoke, docker-build-smoke]
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create Kubernetes evidence directory
+        run: mkdir -p ci-logs
+
+      - name: Download selected serving model
+        uses: actions/download-artifact@v4
+        with:
+          name: serving-model-${{ github.run_id }}
+          path: models/
+
+      - name: Create temporary Kind cluster
+        uses: helm/kind-action@v1.12.0
+        with:
+          cluster_name: heart-disease-ci
+
+      - name: Build image for Kubernetes
+        run: |
+          set -o pipefail
+          docker build --pull --tag heart-disease-mlops:latest . \
+            2>&1 | tee ci-logs/kubernetes-image-build.log
+
+      - name: Load image into Kind
+        run: |
+          set -o pipefail
+          kind load docker-image heart-disease-mlops:latest \
+            --name heart-disease-ci 2>&1 | tee ci-logs/kind-image-load.log
+
+      - name: Deploy Kubernetes manifest
+        run: |
+          set -o pipefail
+          kubectl apply -f deployment/deployment.yaml \
+            2>&1 | tee ci-logs/kubectl-apply.log
+          kubectl rollout status deployment/heart-disease-api --timeout=180s \
+            2>&1 | tee ci-logs/kubectl-rollout.log
+          kubectl get pods,services -o wide \
+            2>&1 | tee ci-logs/kubernetes-resources.log
+
+      - name: Smoke-test API through Kubernetes Service
+        run: |
+          set -euo pipefail
+          kubectl port-forward service/heart-disease-api 8000:8000 \
+            > ci-logs/kubectl-port-forward.log 2>&1 &
+          echo $! > ci-logs/port-forward.pid
+
+          ready=0
+          for attempt in {1..30}; do
+            if curl --silent --show-error --fail \
+              http://127.0.0.1:8000/health \
+              --output ci-logs/kubernetes-health-response.json; then
+              ready=1
+              break
+            fi
+            sleep 2
+          done
+
+          if [ "$ready" -ne 1 ]; then
+            echo "Kubernetes API did not become healthy within 60 seconds."
+            kubectl get pods -o wide || true
+            kubectl describe deployment heart-disease-api || true
+            kubectl logs deployment/heart-disease-api --all-containers=true || true
+            exit 1
+          fi
+
+          python - <<'PY' 2>&1 | tee ci-logs/kubernetes-smoke-test.log
+          import json
+          from urllib.request import Request, urlopen
+
+          with open("ci-logs/kubernetes-health-response.json", encoding="utf-8") as file:
+              health = json.load(file)
+          assert health.get("status") == "healthy", health
+          assert health.get("model_loaded") is True, health
+          print("Kubernetes health check passed:", health)
+
+          payload = {
+              "age": 63, "sex": 1, "cp": 4, "trestbps": 145, "chol": 233,
+              "fbs": 1, "restecg": 2, "thalach": 150, "exang": 0,
+              "oldpeak": 2.3, "slope": 3, "ca": 0, "thal": 6,
+          }
+          request = Request(
+              "http://127.0.0.1:8000/predict",
+              data=json.dumps(payload).encode("utf-8"),
+              headers={"Content-Type": "application/json"},
+              method="POST",
+          )
+          with urlopen(request, timeout=15) as response:
+              assert response.status == 200, response.status
+              result = json.loads(response.read().decode("utf-8"))
+
+          assert result.get("prediction") in (0, 1), result
+          assert result.get("prediction_label") in {
+              "disease_present", "no_disease_detected"
+          }, result
+          probability = result.get("probability_disease_present")
+          assert isinstance(probability, (int, float)), result
+          assert 0 <= probability <= 1, result
+          assert result.get("model"), result
+          print("Kubernetes prediction smoke test passed:", json.dumps(result))
+          PY
+
+      - name: Capture Kubernetes diagnostics
+        if: always()
+        run: |
+          mkdir -p ci-logs
+          kubectl get pods,services -o wide > ci-logs/kubernetes-resources-final.log 2>&1 || true
+          kubectl describe deployment heart-disease-api > ci-logs/kubernetes-deployment-final.log 2>&1 || true
+          kubectl logs deployment/heart-disease-api --all-containers=true > ci-logs/kubernetes-pod.log 2>&1 || true
+
+      - name: Upload Kubernetes smoke-test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: heart-disease-kubernetes-evidence-${{ github.run_id }}
+          path: ci-logs/
           if-no-files-found: warn
           retention-days: 14
