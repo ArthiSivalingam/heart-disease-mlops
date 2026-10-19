@@ -228,4 +228,4 @@ The screenshots document relevant stages of the workflow, including MLflow exper
 
 This project demonstrates an end-to-end MLOps workflow for a heart disease classification application. It brings together machine learning development, experiment tracking, automated validation, API serving, containerization, deployment, and monitoring.
 
-The project provides practical experience in building and operating a reproducible machine learning application.
+The project provides practical experience in building and operating a reproducible machine learning application..
