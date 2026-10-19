@@ -1,4 +1,3 @@
-
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -39,10 +38,9 @@ kind: Service
 metadata:
   name: heart-disease-api
 spec:
-  type: NodePort
+  type: LoadBalancer
   selector:
     app: heart-disease-api
   ports:
     - port: 8000
       targetPort: 8000
-      nodePort: 30080
